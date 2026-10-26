@@ -4,6 +4,6 @@
    Essas duas informações são públicas por natureza: a segurança dos dados
    vem das regras do banco (supabase/schema.sql). */
 window.SALDO_VERDE_CONFIG = {
-  url: "https://xoasdnmojtsgqysshull.supabase.co",
-  key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvYXNkbm1vanRzZ3F5c3NodWxsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMwMjI0MzUsImV4cCI6MjEwODU5ODQzNX0.gM8TVmUxqvrJrMTrDODE60b58Ti_9PBiS2ON0d09XUQ"
+  url: "https://zlvqcqjtosrtfiteuqbs.supabase.co",
+  key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsdnFjcWp0b3NydGZpdGV1cWJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMwMjE0NzksImV4cCI6MjEwODU5NzQ3OX0.L-Q2J1w-oeyLm-WHmF2DZHMX15nAK9br6-EPRkh8QVw"
 };
