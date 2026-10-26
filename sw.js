@@ -2,7 +2,7 @@
    - Arquivos do próprio site: tenta a rede primeiro (pega atualizações) e usa o cache sem internet.
    - Fontes do Google: cache primeiro.
    - Qualquer outra coisa (como o banco de dados dos grupos) passa direto, sem cache. */
-const CACHE = "saldo-verde-v6";
+const CACHE = "saldo-verde-v7";
 const CORE = ["./", "index.html", "app.js", "config.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {

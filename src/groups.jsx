@@ -660,6 +660,7 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
   const [err, setErr] = useState("");
   const [tab, setTab] = useState("despesas");
   const [sheet, setSheet] = useState(null);
+  const [inviting, setInviting] = useState(false);
 
   const load = async () => {
     const [gr, mr, er, sr, rr] = await Promise.all([
@@ -739,6 +740,7 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
                 {sel !== curMonth && <button className="today" onClick={() => setSel(curMonth)}>Hoje</button>}
               </div>
             )}
+            {me && <button className="btn ghost" onClick={() => setInviting(true)}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><Icon name="share" size={16} />Convidar</span></button>}
             {me && <button className="btn sm" onClick={() => openNew()}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><Icon name="add" size={17} />Nova despesa</span></button>}
           </div>
         </div>
@@ -769,6 +771,7 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
       {tab === "resumo" && <SummaryTab g={g} members={members} expenses={expenses} recurring={recurring} sel={sel} fm={fm} isAdmin={isAdmin} reload={load} notify={notify} />}
       {tab === "pessoas" && <PeopleTab g={g} members={members} me={me} isAdmin={isAdmin} fm={fm} reload={load} notify={notify} onBack={onBack} onAllowance={(child) => openNew({ category: "mesada", for_member: child.id, description: `Mesada de ${child.name}`, amount: child.allowance })} />}
 
+      {inviting && <InviteSheet g={g} members={members} onClose={() => setInviting(false)} />}
       {sheet && me && (
         <ExpenseSheet g={g} members={members} me={me} sel={sel} expense={sheet.expense} preset={sheet.preset} isAdmin={isAdmin} session={session}
           onClose={() => setSheet(null)} onSaved={(msg) => { setSheet(null); notify(msg); load(); }} />
@@ -1348,29 +1351,75 @@ function SummaryTab({ g, members, expenses: allExp, recurring, sel, fm, isAdmin,
   );
 }
 
+/* ---------- Convite (código, link e compartilhar) ---------- */
+function InviteBox({ g, members }) {
+  const link = `${appUrl()}?convite=${g.invite_code}`;
+  const [copied, setCopied] = useState("");
+  const [err, setErr] = useState("");
+  const pending = (members || []).filter((m) => !m.user_id && !m.is_child);
+  const text = `Entre no grupo “${g.name}” no Saldo Verde para dividirmos as despesas. Abra o link: ${link} (código ${g.invite_code})`;
+  const copy = async (value, what) => {
+    try { await navigator.clipboard.writeText(value); setCopied(what); setErr(""); setTimeout(() => setCopied(""), 2200); }
+    catch (e) {
+      const el = document.getElementById("inv-link");
+      if (el) { el.focus(); el.select(); }
+      setErr("Não deu para copiar automaticamente. O link está selecionado: toque nele e escolha Copiar.");
+    }
+  };
+  const share = async () => {
+    try { await navigator.share({ title: `Convite: ${g.name}`, text }); }
+    catch (e) { /* compartilhamento cancelado */ }
+  };
+  const canShare = typeof navigator !== "undefined" && !!navigator.share;
+  return (
+    <div className="form">
+      {pending.length > 0 && <p className="hint">Esperando entrar: {pending.map((m) => m.name).join(", ")}. Ao abrir o link, a pessoa escolhe o próprio nome.</p>}
+      <div className="btnrow">
+        {canShare && <button type="button" className="btn" onClick={share}><span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}><Icon name="share" size={18} />Enviar convite</span></button>}
+        <button type="button" className={canShare ? "btn ghost" : "btn"} style={canShare ? { height: 44 } : null} onClick={() => copy(text, "msg")}>
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><Icon name="copy" size={16} />{copied === "msg" ? "Mensagem copiada" : "Copiar mensagem"}</span>
+        </button>
+      </div>
+      <p className="hint">{canShare ? "“Enviar convite” abre o WhatsApp, Mensagens e outros apps do celular." : "Cole a mensagem no WhatsApp ou onde preferir."}</p>
+      <div className="code-box">
+        <div><small className="hint">Código do grupo</small><br /><code>{g.invite_code}</code></div>
+        <button type="button" className="btn ghost" onClick={() => copy(g.invite_code, "code")}>{copied === "code" ? "Copiado" : "Copiar código"}</button>
+      </div>
+      <div className="field"><label htmlFor="inv-link">Link de convite</label>
+        <div className="addline">
+          <input id="inv-link" className="input" readOnly value={link} onFocus={(e) => e.target.select()} />
+          <button type="button" className="btn ghost" style={{ height: 42 }} onClick={() => copy(link, "link")}>{copied === "link" ? "Copiado" : "Copiar"}</button>
+        </div></div>
+      {err && <p className="err">{err}</p>}
+    </div>
+  );
+}
+
+function InviteSheet({ g, members, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+  return (
+    <div className="sheet-bg" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Convidar pessoas">
+        <div className="sheet-h"><h2>Convidar para “{g.name}”</h2><button type="button" className="iconbtn" onClick={onClose} aria-label="Fechar"><Icon name="x" size={18} /></button></div>
+        <InviteBox g={g} members={members} />
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Pessoas, convite e configurações ---------- */
 function PeopleTab({ g, members, me, isAdmin, fm, reload, notify, onBack, onAllowance }) {
   const casa = g.kind === "casa";
-  const link = `${appUrl()}?convite=${g.invite_code}`;
-  const [copied, setCopied] = useState("");
   const [add, setAdd] = useState({ name: "", is_child: false, allowance: "" });
   const [editing, setEditing] = useState(null);
   const [ed, setEd] = useState({});
   const [err, setErr] = useState("");
   const [gname, setGname] = useState(g.name);
 
-  const copy = async (text, what) => {
-    try { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(""), 2000); }
-    catch (e) {
-      const el = document.getElementById("pp-link");
-      if (el) { el.focus(); el.select(); }
-      setErr("Não deu para copiar automaticamente. O link está selecionado: copie manualmente.");
-    }
-  };
-  const share = async () => {
-    try { await navigator.share({ title: `Convite: ${g.name}`, text: `Entre no grupo “${g.name}” no Saldo Verde. Código: ${g.invite_code}`, url: link }); }
-    catch (e) { /* compartilhamento cancelado */ }
-  };
   const addMember = async (e) => {
     e.preventDefault();
     if (!add.name.trim()) return setErr("Digite o nome da pessoa.");
@@ -1428,6 +1477,10 @@ function PeopleTab({ g, members, me, isAdmin, fm, reload, notify, onBack, onAllo
   return (
     <div className="grid2">
       <div className="stack">
+        <div className="card">
+          <div className="card-h"><h2>Convidar pessoas</h2></div>
+          <InviteBox g={g} members={members} />
+        </div>
         <div className="card">
           <div className="card-h"><h2>Pessoas no grupo</h2><small>{members.length}</small></div>
           {err && <p className="err" style={{ marginBottom: 10 }}>{err}</p>}
@@ -1499,21 +1552,6 @@ function PeopleTab({ g, members, me, isAdmin, fm, reload, notify, onBack, onAllo
       </div>
 
       <div className="stack">
-        <div className="card">
-          <div className="card-h"><h2>Convidar pessoas</h2></div>
-          <div className="code-box">
-            <div><small className="hint">Código do grupo</small><br /><code>{g.invite_code}</code></div>
-            <button className="btn ghost" onClick={() => copy(g.invite_code, "code")}>{copied === "code" ? "Copiado" : "Copiar código"}</button>
-          </div>
-          <div className="field" style={{ marginTop: 14 }}><label htmlFor="pp-link">Link de convite</label>
-            <input id="pp-link" className="input" readOnly value={link} onFocus={(e) => e.target.select()} /></div>
-          <div className="btnrow" style={{ marginTop: 10 }}>
-            <button className="btn sm" onClick={() => copy(link, "link")}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><Icon name="copy" size={16} />{copied === "link" ? "Link copiado" : "Copiar link"}</span></button>
-            {typeof navigator !== "undefined" && navigator.share && <button className="btn ghost" onClick={share}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}><Icon name="share" size={16} />Compartilhar</span></button>}
-          </div>
-          <p className="hint" style={{ marginTop: 10 }}>Quem abrir o link cria uma conta e entra direto no grupo.</p>
-        </div>
-
         <div className="card form">
           <div className="card-h" style={{ marginBottom: 0 }}><h2>Configurações</h2></div>
           {isAdmin && (
