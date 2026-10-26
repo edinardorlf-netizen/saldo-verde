@@ -2,7 +2,7 @@
    - Arquivos do próprio site: tenta a rede primeiro (pega atualizações) e usa o cache sem internet.
    - Fontes do Google: cache primeiro.
    - Qualquer outra coisa (como o banco de dados dos grupos) passa direto, sem cache. */
-const CACHE = "saldo-verde-v5";
+const CACHE = "saldo-verde-v6";
 const CORE = ["./", "index.html", "app.js", "config.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -23,8 +23,10 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
 
   if (url.origin === self.location.origin) {
+    /* "no-cache" confere com o servidor a cada vez, para nunca usar uma configuração antiga */
+    const fresh = req.mode === "navigate" ? fetch(req.url, { cache: "no-cache" }) : fetch(req, { cache: "no-cache" });
     e.respondWith(
-      fetch(req)
+      fresh
         .then((res) => {
           if (res && res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
           return res;

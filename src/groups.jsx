@@ -145,7 +145,7 @@ function errMsg(e) {
   if (/already registered|already been registered|already exists/i.test(m)) return "Este e-mail já tem conta. Use “Entrar”.";
   if (/Password should be|at least 6/i.test(m)) return "A senha precisa ter pelo menos 6 caracteres.";
   if (/invalid.*email|Unable to validate email/i.test(m)) return "Confira o e-mail digitado.";
-  if (/Failed to fetch|NetworkError|network|Load failed/i.test(m)) return "Sem conexão com a internet. Tente de novo.";
+  if (/Failed to fetch|NetworkError|network|Load failed/i.test(m)) return "Não foi possível falar com o servidor do app. Confira a internet e, se ela estiver ok, feche e abra o app de novo.";
   if (/rate limit|too many/i.test(m)) return "Muitas tentativas seguidas. Aguarde alguns minutos.";
   if (/expenses_recurring_id_occurrence_key|duplicate key/i.test(m)) return "Essa conta já foi registrada como paga por alguém do grupo.";
   if (/foreign key/i.test(m)) return "Esta pessoa tem despesas ou pagamentos no grupo e não pode ser removida.";
