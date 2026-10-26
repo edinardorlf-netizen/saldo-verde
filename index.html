@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Saldo Verde</title>
+<meta name="theme-color" content="#F3F6F4">
+<meta name="description" content="Controle financeiro pessoal">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Saldo Verde">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<style>
+html,body{background:#F3F6F4;margin:0;overscroll-behavior-y:none}
+body .main{padding-top:calc(20px + env(safe-area-inset-top,0px))}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);background:#F3F6F4;z-index:40}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="react.production.min.js"></script>
+<script src="react-dom.production.min.js"></script>
+<script src="app.js"></script>
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () { navigator.serviceWorker.register("sw.js").catch(function () {}); });
+}
+</script>
+</body>
+</html>
