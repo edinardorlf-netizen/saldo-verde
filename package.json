@@ -1,0 +1,17 @@
+{
+  "name": "saldo-verde",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Controle financeiro pessoal com grupos compartilhados (casa e viagem).",
+  "scripts": {
+    "build": "esbuild src/main.jsx --bundle --minify --format=iife --target=es2018 --define:process.env.NODE_ENV='\"production\"' --outfile=app.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.49.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.20.2"
+  }
+}
