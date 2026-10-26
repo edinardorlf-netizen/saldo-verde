@@ -4,6 +4,7 @@ import {
   r2, sum, brl, brlShort, uid, fmtDate, parseMoney, Icon, HBar, ConfirmX,
 } from "./shared.jsx";
 import { GroupsSection } from "./groups.jsx";
+import { FeedbackButton } from "./feedback.jsx";
 
 /* ============================================================
    Saldo Verde — controle financeiro pessoal
@@ -270,7 +271,7 @@ button{cursor:pointer}
 .side-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:12px;border-radius:12px;background:var(--green-tint);border:1px solid var(--green-soft)}
 .side-foot b{display:block;color:var(--ink);font-size:13px;margin-bottom:2px}
 
-.main{margin-left:236px;padding-block:28px 56px;padding-left:max(32px, env(safe-area-inset-left,0px));padding-right:max(32px, env(safe-area-inset-right,0px));max-width:1440px}
+.main{margin-left:236px;padding-block:28px 96px;padding-left:max(32px, env(safe-area-inset-left,0px));padding-right:max(32px, env(safe-area-inset-right,0px));max-width:1440px}
 .top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:24px}
 .top h1{margin:0;font-size:26px;letter-spacing:-.025em;font-weight:800;text-wrap:balance}
 .top p{margin:4px 0 0;color:var(--muted)}
@@ -283,7 +284,7 @@ button{cursor:pointer}
 .bnav{display:none}
 @media (max-width:860px){
   .side{display:none}
-  .main{margin-left:0;padding-block:20px calc(92px + env(safe-area-inset-bottom,0px));padding-left:max(16px, env(safe-area-inset-left,0px));padding-right:max(16px, env(safe-area-inset-right,0px))}
+  .main{margin-left:0;padding-block:20px calc(144px + env(safe-area-inset-bottom,0px));padding-left:max(16px, env(safe-area-inset-left,0px));padding-right:max(16px, env(safe-area-inset-right,0px))}
   .top h1{font-size:22px}
   .bnav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--surface);border-top:1px solid var(--line);
     padding:6px max(6px, env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) max(6px, env(safe-area-inset-left,0px));justify-content:space-around}
@@ -463,7 +464,7 @@ button{cursor:pointer}
 .eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;color:var(--green-ink)}
 
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.2);z-index:50;display:flex;gap:8px;align-items:center}
-@media (max-width:860px){.toast{bottom:calc(84px + env(safe-area-inset-bottom,0px))}}
+@media (max-width:860px){.toast{bottom:calc(136px + env(safe-area-inset-bottom,0px))}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 
@@ -1477,6 +1478,7 @@ export default function App() {
         ))}
       </nav>
 
+      <FeedbackButton screen={meta.label} />
       {toast && <div className="toast" role="status"><Icon name="check" size={18} />{toast}</div>}
     </div>
   );
