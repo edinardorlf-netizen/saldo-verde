@@ -100,20 +100,30 @@ function makeSample() {
   let seed = 11;
   const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
   const tx = [];
-  const add = (type, desc, amount, cat, date) => tx.push({ id: uid(), type, desc, amount: r2(amount), cat, date });
+  const today = todayStr();
+  const add = (type, desc, amount, cat, date, extra) => tx.push({ id: uid(), type, desc, amount: r2(amount), cat, date, status: "pago", ...extra });
+  const start = addM(cur, -5);
+  const rec = [
+    { id: "r-sal", type: "receita", desc: "Salário", amount: 5200, cat: "salario", day: 5, start, count: null, end: null, skipped: [] },
+    { id: "r-alu", type: "gasto", desc: "Aluguel", amount: 1450, cat: "moradia", day: 10, start, count: null, end: null, skipped: [] },
+    { id: "r-sau", type: "gasto", desc: "Plano de saúde", amount: 310, cat: "saude", day: 12, start, count: null, end: null, skipped: [] },
+    { id: "r-net", type: "gasto", desc: "Internet e celular", amount: 149.9, cat: "assinaturas", day: 15, start, count: null, end: null, skipped: [] },
+    { id: "r-cur", type: "gasto", desc: "Curso de inglês", amount: 280, cat: "educacao", day: 20, start: addM(cur, -1), count: 6, end: null, skipped: [] },
+  ];
   for (let k = -5; k <= 0; k++) {
     const m = addM(cur, k);
     const d = (day) => `${m}-${pad(day)}`;
-    add("receita", "Salário", 5200, "salario", d(5));
+    rec.forEach((r) => {
+      if (m < r.start || (r.count && monthsBetween(r.start, m) >= r.count)) return;
+      const date = d(Math.min(r.day, daysIn(m)));
+      if (date <= today) add(r.type, r.desc, r.amount, r.cat, date, { recurId: r.id, recurMonth: m, paidDate: date });
+    });
     if (k % 2 === 0) add("receita", "Projeto freelance", 600 + rnd() * 900, "freela", d(18));
     if (k === -2) add("receita", "Rendimento da poupança", 84.3, "rendimentos", d(1));
-    add("gasto", "Aluguel", 1450, "moradia", d(10));
     add("gasto", "Supermercado do mês", 520 + rnd() * 250, "mercado", d(8));
     add("gasto", "Feira e padaria", 160 + rnd() * 120, "mercado", d(21));
     add("gasto", "Combustível", 210 + rnd() * 90, "transporte", d(14));
     add("gasto", "Jantar fora", 90 + rnd() * 160, "restaurante", d(19));
-    add("gasto", "Plano de saúde", 310, "saude", d(12));
-    add("gasto", "Internet e celular", 149.9, "assinaturas", d(15));
     if (k % 3 !== 0) add("gasto", "Cinema e passeios", 80 + rnd() * 120, "lazer", d(24));
   }
   const cards = [
@@ -132,19 +142,94 @@ function makeSample() {
     p("c2", "Passagens aéreas", 1800, 6, "viagem", 0, 2),
     p("c2", "Curso online", 960, 8, "educacao", -2, 4),
   ];
-  return { tx, cards, purchases, goal: 1000, sample: true };
+  tx.push({ id: uid(), type: "gasto", desc: "IPVA (parcela)", amount: 412.5, cat: "transporte", date: `${addM(cur, 1)}-${pad(8)}`, status: "previsto" });
+  tx.push({ id: uid(), type: "receita", desc: "Reembolso do plano", amount: 180, cat: "outros-r", date: `${cur}-${pad(Math.min(28, daysIn(cur)))}`, status: "previsto" });
+  return { tx, rec, cards, purchases, goal: 1000, sample: true };
 }
 
-const EMPTY = { tx: [], cards: [], purchases: [], goal: 1000, sample: false };
+const EMPTY = { tx: [], rec: [], cards: [], purchases: [], goal: 1000, sample: false };
+
+/* ---------- Contas previstas e repetições ---------- */
+const daysIn = (m) => new Date(yearOf(m), monthIdx(m) + 1, 0).getDate();
+const monthsBetween = (a, b) => (yearOf(b) - yearOf(a)) * 12 + monthIdx(b) - monthIdx(a);
+const isPaid = (t) => !t.virtual && t.status !== "previsto";
+const addDays = (dateStr, n) => { const [y, m, d] = dateStr.split("-").map(Number); const x = new Date(y, m - 1, d + n); return `${ym(x)}-${pad(x.getDate())}`; };
+const lastMonthOf = (r) => {
+  const byCount = r.count ? addM(r.start, r.count - 1) : null;
+  if (byCount && r.end) return byCount < r.end ? byCount : r.end;
+  return byCount || r.end || null;
+};
+
+/* Ocorrências ainda não pagas das contas que se repetem, entre dois meses (inclusive). */
+function virtualOccurrences(rules, tx, fromM, toM) {
+  const out = [];
+  (rules || []).forEach((r) => {
+    const last = lastMonthOf(r);
+    let m = r.start > fromM ? r.start : fromM;
+    for (let guard = 0; m <= toM && guard < 240; guard++, m = addM(m, 1)) {
+      if (last && m > last) break;
+      if ((r.skipped || []).includes(m)) continue;
+      if (tx.some((t) => t.recurId === r.id && t.recurMonth === m)) continue;
+      out.push({
+        id: `v-${r.id}-${m}`, virtual: true, recurId: r.id, recurMonth: m, type: r.type, desc: r.desc,
+        amount: r.amount, cat: r.cat, date: `${m}-${pad(Math.min(r.day, daysIn(m)))}`, status: "previsto",
+      });
+    }
+  });
+  return out;
+}
+
+function dueLabel(date) {
+  const t = todayStr();
+  if (date < t) return { cls: "late", txt: `Atrasada desde ${fmtDate(date).slice(0, 5)}` };
+  if (date === t) return { cls: "today", txt: "Vence hoje" };
+  const days = Math.round((new Date(date) - new Date(t)) / 864e5);
+  return { cls: "soon", txt: days <= 7 ? `Vence em ${days} ${days === 1 ? "dia" : "dias"}` : `Vence ${fmtDate(date).slice(0, 5)}` };
+}
 
 /* ---------- Estatísticas ---------- */
 function monthStats(data, inst, m) {
-  const tx = data.tx.filter((t) => t.date.slice(0, 7) === m);
+  const all = [...data.tx.filter((t) => t.date.slice(0, 7) === m), ...virtualOccurrences(data.rec, data.tx, m, m)];
+  const tx = all.filter(isPaid);
+  const pend = all.filter((t) => !isPaid(t));
   const parcelas = inst.filter((i) => i.month === m);
   const rec = sum(tx.filter((t) => t.type === "receita"));
   const vista = sum(tx.filter((t) => t.type === "gasto"));
+  const recPend = sum(pend.filter((t) => t.type === "receita"));
+  const gastoPend = sum(pend.filter((t) => t.type === "gasto"));
   const parc = sum(parcelas);
-  return { tx, parcelas, rec, vista, parc, gasto: r2(vista + parc), saldo: r2(rec - vista - parc) };
+  const saldo = r2(rec - vista - parc);
+  return { all, tx, pend, parcelas, rec, vista, parc, recPend, gastoPend, gasto: r2(vista + parc), saldo, saldoPrev: r2(saldo + recPend - gastoPend) };
+}
+
+/* Ações sobre contas previstas, compartilhadas por Visão Geral, Lançar e Histórico. */
+function billActions(setData) {
+  return {
+    pay: (item, amount) => setData((d) => (item.virtual
+      ? { ...d, tx: [...d.tx, { id: uid(), type: item.type, desc: item.desc, amount, cat: item.cat, date: item.date, status: "pago", paidDate: todayStr(), recurId: item.recurId, recurMonth: item.recurMonth }] }
+      : { ...d, tx: d.tx.map((t) => (t.id === item.id ? { ...t, amount, status: "pago", paidDate: todayStr() } : t)) })),
+    skip: (item) => setData((d) => ({ ...d, rec: (d.rec || []).map((r) => (r.id === item.recurId ? { ...r, skipped: [...(r.skipped || []), item.recurMonth] } : r)) })),
+    undo: (t) => setData((d) => (t.recurId
+      ? { ...d, tx: d.tx.filter((x) => x.id !== t.id) }
+      : { ...d, tx: d.tx.map((x) => (x.id === t.id ? { ...x, status: "previsto", paidDate: undefined } : x)) })),
+    remove: (t) => setData((d) => ({ ...d, tx: d.tx.filter((x) => x.id !== t.id) })),
+  };
+}
+
+/* Botão "Pagar/Receber" que permite ajustar o valor antes de confirmar. */
+function PayInline({ item, onPay }) {
+  const [open, setOpen] = useState(false);
+  const [v, setV] = useState(String(item.amount).replace(".", ","));
+  const income = item.type === "receita";
+  if (!open) return <button type="button" className="btn sm paybtn" onClick={(e) => { e.stopPropagation(); setOpen(true); }}>{income ? "Receber" : "Pagar"}</button>;
+  const confirm = () => { const n = parseMoney(v); if (n > 0) { onPay(item, n); setOpen(false); } };
+  return (
+    <span className="payline" onClick={(e) => e.stopPropagation()}>
+      <input className="input num" inputMode="decimal" aria-label="Valor" value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirm()} autoFocus />
+      <button type="button" className="btn sm" onClick={confirm}>OK</button>
+      <button type="button" className="xbtn" onClick={() => setOpen(false)}>Cancelar</button>
+    </span>
+  );
 }
 
 /* ============================================================
@@ -339,6 +424,18 @@ button{cursor:pointer}
 .xbtn:hover{background:var(--red-soft);color:var(--red)}
 .xbtn.confirm{background:var(--red);color:#fff}
 
+/* Contas previstas */
+.row.pending .row-amt{color:var(--muted)}
+.row-acts{display:flex;align-items:center;gap:4px;flex:none}
+.paybtn{height:30px;padding:0 12px;font-size:12.5px}
+.payline{display:flex;align-items:center;gap:6px;flex:none}
+.payline .input{width:104px;height:34px;padding:0 8px;text-align:right}
+.due{font-weight:600;border-radius:6px;padding:1px 6px;font-size:11.5px}
+.due.late{background:var(--red-soft);color:var(--red)}
+.due.today{background:var(--amber-soft);color:var(--amber)}
+.due.soon{background:var(--line-2);color:var(--ink-2)}
+@media (max-width:560px){.row.pending,.row:has(.row-acts){flex-wrap:wrap}.row-acts{margin-left:50px}}
+
 /* Timeline */
 .scrollx{overflow-x:auto;margin:0 -4px;padding:0 4px}
 .timeline{width:100%;min-width:600px;height:auto;display:block}
@@ -525,20 +622,45 @@ function CatChips({ type, value, onChange }) {
   );
 }
 
-function TxRow({ t, cards, onDelete }) {
+function TxRow({ t, cards, onDelete, actions }) {
   const c = catOf(t.cat);
   const isInst = !!t.purchaseId;
   const card = isInst ? cards.find((k) => k.id === t.cardId) : null;
   const income = t.type === "receita";
+  const pending = !isInst && !isPaid(t);
+  const due = pending ? dueLabel(t.date) : null;
   return (
-    <div className="row">
+    <div className={`row${pending ? " pending" : ""}`}>
       <div className="row-ico" style={{ background: income ? "var(--green-soft)" : "var(--line-2)" }}>{c.emoji}</div>
       <div className="row-main">
-        <b>{t.desc}{isInst && <span className="tag"><i className="dot" style={{ background: card ? card.color : "#999" }} />{t.num}/{t.n}</span>}</b>
-        <span>{c.name} · {isInst ? `${card ? card.name : "Cartão"} · fatura de ${shortMonth(t.month)}` : fmtDate(t.date)}</span>
+        <b>{t.desc}
+          {isInst && <span className="tag"><i className="dot" style={{ background: card ? card.color : "#999" }} />{t.num}/{t.n}</span>}
+          {t.recurId && <span className="tag" title="Repete todo mês">🔁</span>}
+        </b>
+        <span>
+          {pending && <span className={`due ${due.cls}`}>{income ? due.txt.replace("Vence", "Previsto").replace("Atrasada", "Atrasado") : due.txt}</span>}
+          {pending ? " · " : ""}{c.name} · {isInst ? `${card ? card.name : "Cartão"} · fatura de ${shortMonth(t.month)}` : fmtDate(t.date)}
+        </span>
       </div>
       <div className={`row-amt ${income ? "in" : "out"}`}>{income ? "+ " : "− "}{brl(t.amount)}</div>
+      {actions}
       {onDelete && onDelete}
+    </div>
+  );
+}
+
+function BillList({ items, cards, acts, emptyText }) {
+  if (!items.length) return <div className="empty">{emptyText}</div>;
+  return (
+    <div className="list">
+      {items.map((t) => (
+        <TxRow key={t.id} t={t} cards={cards} actions={
+          <div className="row-acts">
+            <PayInline item={t} onPay={acts.pay} />
+            {t.virtual ? <ConfirmX label="Pular" confirmLabel="Pular este mês?" onConfirm={() => acts.skip(t)} /> : <ConfirmX onConfirm={() => acts.remove(t)} />}
+          </div>
+        } />
+      ))}
     </div>
   );
 }
@@ -548,6 +670,7 @@ function TxRow({ t, cards, onDelete }) {
    ============================================================ */
 function Overview({ data, setData, inst, sel, go }) {
   const st = monthStats(data, inst, sel);
+  const acts = billActions(setData);
   const last6 = Array.from({ length: 6 }, (_, i) => addM(sel, i - 5));
   const series = last6.map((m) => monthStats(data, inst, m));
   const prev = series[4];
@@ -560,9 +683,9 @@ function Overview({ data, setData, inst, sel, go }) {
   };
 
   const kpis = [
-    { label: "Receitas", value: st.rec, values: series.map((s) => s.rec), color: "#0E9F5A", bg: "var(--green-soft)", icon: "up", d: delta(st.rec, prev.rec), sub: `${st.tx.filter((t) => t.type === "receita").length} entradas` },
-    { label: "Gastos", value: st.gasto, values: series.map((s) => s.gasto), color: "#D64545", bg: "var(--red-soft)", icon: "down", d: delta(st.gasto, prev.gasto, true), sub: `${brl(st.vista)} à vista · ${brl(st.parc)} no cartão` },
-    { label: "Saldo", value: st.saldo, values: series.map((s) => s.saldo), color: "#1F3A5F", bg: "#E8EEF6", icon: "wallet", d: delta(st.saldo, prev.saldo), sub: st.saldo >= 0 ? "Sobrou dinheiro no mês" : "Gastos acima das receitas" },
+    { label: "Receitas", value: st.rec, values: series.map((s) => s.rec), color: "#0E9F5A", bg: "var(--green-soft)", icon: "up", d: delta(st.rec, prev.rec), sub: st.recPend > 0 ? `+ ${brl(st.recPend)} ainda a receber` : `${st.tx.filter((t) => t.type === "receita").length} entradas` },
+    { label: "Gastos", value: st.gasto, values: series.map((s) => s.gasto), color: "#D64545", bg: "var(--red-soft)", icon: "down", d: delta(st.gasto, prev.gasto, true), sub: st.gastoPend > 0 ? `${brl(st.gastoPend)} ainda a pagar · ${brl(st.parc)} no cartão` : `${brl(st.vista)} à vista · ${brl(st.parc)} no cartão` },
+    { label: "Saldo", value: st.saldo, values: series.map((s) => s.saldo), color: "#1F3A5F", bg: "#E8EEF6", icon: "wallet", d: delta(st.saldo, prev.saldo), sub: st.pend.length ? `Previsto no fim do mês: ${brl(st.saldoPrev)}` : st.saldo >= 0 ? "Sobrou dinheiro no mês" : "Gastos acima das receitas" },
   ];
 
   /* categorias */
@@ -571,11 +694,12 @@ function Overview({ data, setData, inst, sel, go }) {
   const catItems = Object.entries(byCat).map(([cat, v]) => ({ cat, v })).sort((a, b) => b.v - a.v);
 
   /* compromissos futuros */
-  const futureMonths = Array.from({ length: 6 }, (_, i) => { const key = addM(sel, i + 1); return { key, v: sum(inst.filter((x) => x.month === key)) }; });
-  const futureAll = sum(inst.filter((x) => x.month > sel));
+  const futureMonths = Array.from({ length: 6 }, (_, i) => { const key = addM(sel, i + 1); return { key, v: r2(sum(inst.filter((x) => x.month === key)) + monthStats(data, [], key).gastoPend) }; });
+  const futureAll = r2(futureMonths.reduce((a, m) => a + m.v, 0));
+  const instNext = sum(inst.filter((x) => x.month === addM(sel, 1)));
   const lastMonthWithInst = inst.filter((x) => x.month > sel).reduce((a, x) => (x.month > a ? x.month : a), "");
   const avgRec = series.reduce((a, s) => a + s.rec, 0) / 6 || 0;
-  const heavy = futureMonths[0].v > avgRec * 0.3 && avgRec > 0;
+  const heavy = instNext > avgRec * 0.3 && avgRec > 0;
 
   /* meta */
   const saved = Math.max(st.saldo, 0);
@@ -586,6 +710,17 @@ function Overview({ data, setData, inst, sel, go }) {
   const usedOf = (cardId) => sum(inst.filter((x) => x.cardId === cardId && x.month >= sel));
 
   const recent = [...st.tx, ...st.parcelas].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 7);
+
+  /* contas a pagar e receber: atrasadas e dos próximos 30 dias */
+  const today = todayStr();
+  const limit = addDays(today, 30);
+  const upcoming = [
+    ...data.tx.filter((t) => t.status === "previsto"),
+    ...virtualOccurrences(data.rec, data.tx, addM(ym(new Date()), -12), limit.slice(0, 7)),
+  ].filter((t) => t.date <= limit).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const lateCount = upcoming.filter((t) => t.date < today).length;
+  const upPay = sum(upcoming.filter((t) => t.type === "gasto"));
+  const upRec = sum(upcoming.filter((t) => t.type === "receita"));
 
   return (
     <div className="stack">
@@ -648,15 +783,15 @@ function Overview({ data, setData, inst, sel, go }) {
           <CategoryBars items={catItems} total={st.gasto} />
         </div>
         <div className="card fut">
-          <div className="card-h"><h2>Compromissos futuros</h2><small>Parcelas já assumidas</small></div>
+          <div className="card-h"><h2>Compromissos futuros</h2><small>Parcelas e contas previstas</small></div>
           <div className={`alert ${heavy ? "warn" : "ok"}`}>
             <span style={{ color: heavy ? "var(--amber)" : "var(--green)" }}><Icon name={heavy ? "alert" : "check"} size={22} /></span>
             <div>
-              <b className="num">{brl(futureAll)} comprometidos</b>
+              <b className="num">{brl(futureAll)} nos próximos 6 meses</b>
               <p>
-                {futureAll === 0 ? "Nenhuma parcela futura. Seu orçamento dos próximos meses está livre." :
-                  `${brl(futureMonths[0].v)} já em ${MONTHS[monthIdx(futureMonths[0].key)].toLowerCase()}${lastMonthWithInst ? `, com parcelas até ${shortMonth(lastMonthWithInst)}` : ""}.`}
-                {heavy && " Isso passa de 30% da sua receita média. Evite novos parcelamentos por enquanto."}
+                {futureAll === 0 ? "Nada previsto para os próximos meses. Seu orçamento está livre." :
+                  `${brl(futureMonths[0].v)} já previstos para ${MONTHS[monthIdx(futureMonths[0].key)].toLowerCase()}, somando parcelas do cartão e contas a pagar${lastMonthWithInst ? `. Há parcelas até ${shortMonth(lastMonthWithInst)}` : ""}.`}
+                {heavy && ` Só as parcelas de ${MONTHS[monthIdx(futureMonths[0].key)].toLowerCase()} (${brl(instNext)}) passam de 30% da sua receita média. Evite novos parcelamentos por enquanto.`}
               </p>
             </div>
           </div>
@@ -664,10 +799,26 @@ function Overview({ data, setData, inst, sel, go }) {
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-h"><h2>Últimas transações</h2><button className="btn ghost" onClick={() => go("history")}>Ver todas</button></div>
-        {recent.length ? <div className="list">{recent.map((t) => <TxRow key={t.id} t={t} cards={data.cards} />)}</div> :
-          <div className="empty"><b>Nada lançado em {monthLabel(sel)}</b>Use “Lançar” para registrar a primeira movimentação.</div>}
+      <div className="grid2 even">
+        <div className="card">
+          <div className="card-h">
+            <h2>Contas a pagar e receber</h2>
+            <small className="num">Próximos 30 dias{lateCount ? ` · ${lateCount} ${lateCount === 1 ? "atrasada" : "atrasadas"}` : ""}</small>
+          </div>
+          {upcoming.length > 0 && (
+            <div className="sumrow">
+              <span className="pill out">A pagar {brl(upPay)}</span>
+              <span className="pill in">A receber {brl(upRec)}</span>
+            </div>
+          )}
+          <BillList items={upcoming.slice(0, 8)} cards={data.cards} acts={acts} emptyText="Nenhuma conta prevista para os próximos 30 dias. Em “Lançar”, marque um lançamento como “A pagar” ou faça ele se repetir todo mês." />
+          {upcoming.length > 8 && <button className="linkbtn" style={{ marginTop: 8 }} onClick={() => go("history")}>Ver todas no histórico</button>}
+        </div>
+        <div className="card">
+          <div className="card-h"><h2>Últimas transações</h2><button className="btn ghost" onClick={() => go("history")}>Ver todas</button></div>
+          {recent.length ? <div className="list">{recent.map((t) => <TxRow key={t.id} t={t} cards={data.cards} />)}</div> :
+            <div className="empty"><b>Nada lançado em {monthLabel(sel)}</b>Use “Lançar” para registrar a primeira movimentação.</div>}
+        </div>
       </div>
     </div>
   );
@@ -682,8 +833,9 @@ function Launch({ data, setData, sel, preset, notify, go }) {
 
   /* à vista */
   const [kind, setKind] = useState(preset === "receita" ? "receita" : "gasto");
-  const [f, setF] = useState({ desc: "", amount: "", date: defDate, cat: "" });
+  const [f, setF] = useState({ desc: "", amount: "", date: defDate, cat: "", status: defDate > todayStr() ? "previsto" : "pago", repeat: "nao", count: "12" });
   const [err, setErr] = useState("");
+  const acts = billActions(setData);
 
   /* cartão */
   const [c, setC] = useState({ cardId: data.cards[0] ? data.cards[0].id : "", desc: "", total: "", n: 1, date: defDate, cat: "" });
@@ -703,11 +855,25 @@ function Launch({ data, setData, sel, preset, notify, go }) {
     if (!(amount > 0)) return setErr("Informe um valor maior que zero.");
     if (!f.cat) return setErr("Escolha uma categoria.");
     if (!f.date) return setErr("Escolha a data.");
-    setData((d) => ({ ...d, tx: [...d.tx, { id: uid(), type: kind, desc: f.desc.trim(), amount, cat: f.cat, date: f.date }] }));
-    setF({ desc: "", amount: "", date: f.date, cat: "" });
+    const count = f.repeat === "n" ? Math.round(Number(f.count)) : null;
+    if (f.repeat === "n" && !(count >= 2 && count <= 120)) return setErr("Escolha entre 2 e 120 meses de repetição.");
+    const base = { type: kind, desc: f.desc.trim(), amount, cat: f.cat };
+    if (f.repeat === "nao") {
+      setData((d) => ({ ...d, tx: [...d.tx, { id: uid(), ...base, date: f.date, status: f.status, ...(f.status === "pago" ? { paidDate: todayStr() } : {}) }] }));
+    } else {
+      const rule = { id: uid(), ...base, day: Number(f.date.slice(8, 10)), start: f.date.slice(0, 7), count, end: null, skipped: [] };
+      const firstPaid = f.status === "pago" ? [{ id: uid(), ...base, date: f.date, status: "pago", paidDate: todayStr(), recurId: rule.id, recurMonth: rule.start }] : [];
+      setData((d) => ({ ...d, rec: [...(d.rec || []), rule], tx: [...d.tx, ...firstPaid] }));
+    }
+    setF({ ...f, desc: "", amount: "", cat: "", repeat: "nao" });
     setErr("");
-    notify(kind === "receita" ? `Receita de ${brl(amount)} lançada` : `Gasto de ${brl(amount)} lançado`);
+    const word = kind === "receita" ? "Receita" : "Gasto";
+    notify(f.repeat !== "nao" ? `${word} de ${brl(amount)} vai se repetir todo mês` : f.status === "previsto" ? `${word} de ${brl(amount)} agendado` : `${word} de ${brl(amount)} ${kind === "receita" ? "lançada" : "lançado"}`);
   };
+  const setDate = (date) => setF({ ...f, date, status: date > todayStr() ? "previsto" : f.status });
+  const rules = data.rec || [];
+  const updRule = (id, patch) => setData((d) => ({ ...d, rec: (d.rec || []).map((r) => (r.id === id ? { ...r, ...patch } : r)) }));
+  const delRule = (id) => setData((d) => ({ ...d, rec: (d.rec || []).filter((r) => r.id !== id) }));
 
   const card = data.cards.find((k) => k.id === c.cardId);
   const total = parseMoney(c.total);
@@ -728,6 +894,7 @@ function Launch({ data, setData, sel, preset, notify, go }) {
   };
 
   return (
+    <div className="stack">
     <div className="grid2 even">
       <form className="card form" onSubmit={submitTx} noValidate>
         <div className="card-h" style={{ marginBottom: 0 }}><h2>Receita ou gasto à vista</h2></div>
@@ -746,15 +913,45 @@ function Launch({ data, setData, sel, preset, notify, go }) {
           </div>
           <div className="field">
             <label htmlFor="tx-date">Data</label>
-            <input id="tx-date" className="input" type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
+            <input id="tx-date" className="input" type="date" value={f.date} onChange={(e) => setDate(e.target.value)} />
           </div>
         </div>
         <div className="field">
           <span className="flabel">Categoria</span>
           <CatChips type={kind} value={f.cat} onChange={(cat) => setF({ ...f, cat })} />
         </div>
+        <div className="fgrid">
+          <div className="field">
+            <span className="flabel">Situação</span>
+            <div className="seg">
+              <button type="button" className={f.status === "pago" ? "on r" : ""} onClick={() => setF({ ...f, status: "pago" })}>{kind === "receita" ? "Recebido" : "Pago"}</button>
+              <button type="button" className={f.status === "previsto" ? "on" : ""} onClick={() => setF({ ...f, status: "previsto" })}>{kind === "receita" ? "A receber" : "A pagar"}</button>
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="tx-repeat">Repetir</label>
+            <select id="tx-repeat" className="input" value={f.repeat} onChange={(e) => setF({ ...f, repeat: e.target.value })}>
+              <option value="nao">Não repete</option>
+              <option value="sempre">Todo mês, sem data para acabar</option>
+              <option value="n">Todo mês, por alguns meses</option>
+            </select>
+          </div>
+          {f.repeat === "n" && (
+            <div className="field">
+              <label htmlFor="tx-count">Quantos meses</label>
+              <input id="tx-count" className="input num" inputMode="numeric" value={f.count} onChange={(e) => setF({ ...f, count: e.target.value.replace(/\D/g, "").slice(0, 3) })} />
+            </div>
+          )}
+        </div>
+        {f.repeat !== "nao" && f.date && (
+          <p className="hint">
+            Repete todo dia {Number(f.date.slice(8, 10))}, a partir de {shortMonth(f.date.slice(0, 7))}
+            {f.repeat === "n" && Number(f.count) >= 2 ? ` até ${shortMonth(addM(f.date.slice(0, 7), Number(f.count) - 1))}` : ""}.
+            {f.status === "pago" ? " Este mês já entra como pago; os próximos ficam previstos." : " Todos os meses ficam previstos até você marcar como pago."}
+          </p>
+        )}
         {err && <p className="err">{err}</p>}
-        <button className="btn" type="submit">{kind === "receita" ? "Lançar receita" : "Lançar gasto"}</button>
+        <button className="btn" type="submit">{f.repeat !== "nao" ? "Criar lançamento que se repete" : f.status === "previsto" ? (kind === "receita" ? "Agendar receita" : "Agendar gasto") : kind === "receita" ? "Lançar receita" : "Lançar gasto"}</button>
       </form>
 
       <form id="form-cartao" className="card form" onSubmit={submitCard} noValidate>
@@ -812,6 +1009,53 @@ function Launch({ data, setData, sel, preset, notify, go }) {
           </>
         )}
       </form>
+    </div>
+
+    <div className="card">
+      <div className="card-h"><h2>Lançamentos que se repetem</h2><small>{rules.length ? `${rules.length} ativos` : ""}</small></div>
+      {rules.length ? (
+        <div className="list">
+          {rules.map((r) => <RuleRow key={r.id} r={r} tx={data.tx} onUpdate={(patch) => { updRule(r.id, patch); notify("Lançamento atualizado"); }} onDelete={() => { delRule(r.id); notify("Repetição excluída. O que já foi pago continua no histórico."); }} />)}
+        </div>
+      ) : <div className="empty"><b>Nada se repete ainda</b>Ao lançar aluguel, salário ou internet, escolha “Repetir todo mês” e o app prevê os próximos meses sozinho.</div>}
+    </div>
+    </div>
+  );
+}
+
+function RuleRow({ r, tx, onUpdate, onDelete }) {
+  const [edit, setEdit] = useState(false);
+  const [v, setV] = useState(String(r.amount).replace(".", ","));
+  const c = catOf(r.cat);
+  const income = r.type === "receita";
+  const last = lastMonthOf(r);
+  const paidCount = tx.filter((t) => t.recurId === r.id).length;
+  const curM = ym(new Date());
+  const ended = last && last < curM;
+  const save = () => { const n = parseMoney(v); if (n > 0) { onUpdate({ amount: n }); setEdit(false); } };
+  return (
+    <div className="row" style={{ flexWrap: "wrap" }}>
+      <div className="row-ico" style={{ background: income ? "var(--green-soft)" : "var(--line-2)" }}>{c.emoji}</div>
+      <div className="row-main">
+        <b>{r.desc}{ended && <span className="tag">Encerrado</span>}</b>
+        <span>Todo dia {r.day} · desde {shortMonth(r.start)}{last ? ` até ${shortMonth(last)}` : " · sem data para acabar"} · {paidCount} {income ? (paidCount === 1 ? "recebido" : "recebidos") : (paidCount === 1 ? "pago" : "pagos")}</span>
+      </div>
+      {!edit ? (
+        <>
+          <div className={`row-amt ${income ? "in" : "out"}`}>{income ? "+ " : "− "}{brl(r.amount)}</div>
+          <div className="row-acts">
+            <button type="button" className="xbtn" style={{ color: "var(--ink-2)" }} onClick={() => setEdit(true)}>Alterar valor</button>
+            {!ended && (!last || last > curM) && <ConfirmX label="Encerrar" confirmLabel="Parar depois deste mês?" onConfirm={() => onUpdate({ end: curM })} />}
+            <ConfirmX onConfirm={onDelete} confirmLabel="Excluir repetição?" />
+          </div>
+        </>
+      ) : (
+        <span className="payline">
+          <input className="input num" inputMode="decimal" aria-label="Novo valor" value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} autoFocus />
+          <button type="button" className="btn sm" onClick={save}>Salvar</button>
+          <button type="button" className="xbtn" onClick={() => setEdit(false)}>Cancelar</button>
+        </span>
+      )}
     </div>
   );
 }
@@ -938,7 +1182,10 @@ function Cards({ data, setData, inst, sel, notify }) {
 function History({ data, setData, inst, sel, notify }) {
   const [filter, setFilter] = useState("todas");
   const st = monthStats(data, inst, sel);
-  const txs = st.tx.filter((t) => filter === "todas" || t.type === filter).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const acts = billActions(setData);
+  const txs = st.all
+    .filter((t) => filter === "todas" || (filter === "previstos" ? !isPaid(t) : t.type === filter))
+    .sort((a, b) => (!isPaid(a) !== !isPaid(b) ? (isPaid(a) ? 1 : -1) : isPaid(a) ? (a.date < b.date ? 1 : -1) : (a.date < b.date ? -1 : 1)));
   const parcelas = [...st.parcelas].sort((a, b) => (a.date < b.date ? 1 : -1));
 
   const delTx = (id) => { setData((d) => ({ ...d, tx: d.tx.filter((t) => t.id !== id) })); notify("Lançamento excluído"); };
@@ -952,22 +1199,41 @@ function History({ data, setData, inst, sel, notify }) {
         <div className="card-h">
           <h2>À vista</h2>
           <div className="seg">
-            {["todas", "receita", "gasto"].map((k) => (
+            {["todas", "receita", "gasto", "previstos"].map((k) => (
               <button key={k} type="button" className={filter === k ? `on${k === "receita" ? " r" : k === "gasto" ? " g" : ""}` : ""} onClick={() => setFilter(k)}>
-                {k === "todas" ? "Todas" : k === "receita" ? "Receitas" : "Gastos"}
+                {k === "todas" ? "Todas" : k === "receita" ? "Receitas" : k === "gasto" ? "Gastos" : "Previstos"}
               </button>
             ))}
           </div>
         </div>
         <div className="sumrow">
-          <span className="pill in">Entradas {brl(st.rec)}</span>
-          <span className="pill out">Saídas {brl(st.vista)}</span>
+          <span className="pill in">Recebido {brl(st.rec)}</span>
+          <span className="pill out">Pago {brl(st.vista)}</span>
+          {st.recPend > 0 && <span className="pill">A receber {brl(st.recPend)}</span>}
+          {st.gastoPend > 0 && <span className="pill">A pagar {brl(st.gastoPend)}</span>}
         </div>
         {txs.length ? (
           <div className="list">
-            {txs.map((t) => <TxRow key={t.id} t={t} cards={data.cards} onDelete={<ConfirmX onConfirm={() => delTx(t.id)} />} />)}
+            {txs.map((t) => (
+              <TxRow key={t.id} t={t} cards={data.cards} actions={
+                !isPaid(t) ? (
+                  <div className="row-acts">
+                    <PayInline item={t} onPay={(item, v) => { acts.pay(item, v); notify(item.type === "receita" ? "Marcado como recebido" : "Marcado como pago"); }} />
+                    {t.virtual ? <ConfirmX label="Pular" confirmLabel="Pular este mês?" onConfirm={() => { acts.skip(t); notify("Mês pulado"); }} />
+                      : <ConfirmX onConfirm={() => delTx(t.id)} />}
+                  </div>
+                ) : t.recurId ? (
+                  <ConfirmX label="Desfazer" confirmLabel="Voltar para previsto?" onConfirm={() => { acts.undo(t); notify("Voltou para previsto"); }} />
+                ) : (
+                  <div className="row-acts">
+                    {t.paidDate && <ConfirmX label="Desfazer" confirmLabel="Voltar para previsto?" onConfirm={() => { acts.undo(t); notify("Voltou para previsto"); }} />}
+                    <ConfirmX onConfirm={() => delTx(t.id)} />
+                  </div>
+                )
+              } />
+            ))}
           </div>
-        ) : <div className="empty"><b>Nenhum lançamento à vista em {monthLabel(sel)}</b>Troque o mês no seletor acima ou lance algo novo.</div>}
+        ) : <div className="empty"><b>{filter === "previstos" ? `Nada previsto em ${monthLabel(sel).toLowerCase()}` : `Nenhum lançamento à vista em ${monthLabel(sel)}`}</b>Troque o mês no seletor acima ou lance algo novo.</div>}
       </div>
 
       <div className="card">
@@ -1127,7 +1393,8 @@ export default function App() {
     try { window.scrollTo(0, 0); } catch (e) { /* ignora */ }
   }, [tab]);
 
-  const inst = expandInstallments(data.purchases);
+  const inst = expandInstallments(data.purchases || []);
+  if (!data.rec) data.rec = [];
   const go = (t, p = "") => { setPreset(p); setTab(t); };
   const meta = TABS.find((t) => t.id === tab);
   const cur = ym(new Date());

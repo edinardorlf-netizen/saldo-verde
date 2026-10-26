@@ -55,6 +55,26 @@ create table if not exists public.members (
   unique (group_id, user_id)
 );
 
+-- ---------- Contas que se repetem (ex.: aluguel, internet) ----------
+create table if not exists public.recurring (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.groups(id) on delete cascade,
+  description text not null check (char_length(description) between 1 and 80),
+  amount numeric(12,2) not null check (amount > 0),
+  category text not null default 'outros',
+  paid_by uuid references public.members(id) on delete set null,
+  for_member uuid references public.members(id) on delete set null,
+  split_mode text not null default 'igual' check (split_mode in ('igual', 'proporcao', 'valor')),
+  split_weights jsonb not null default '{}'::jsonb,
+  day int not null check (day between 1 and 31),
+  start_month date not null,
+  months int check (months is null or months between 1 and 120),
+  end_month date,
+  skipped date[] not null default '{}',
+  created_by uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
 -- ---------- Despesas ----------
 create table if not exists public.expenses (
   id uuid primary key default gen_random_uuid(),
@@ -66,8 +86,13 @@ create table if not exists public.expenses (
   paid_by uuid not null references public.members(id) on delete restrict,
   for_member uuid references public.members(id) on delete set null,
   split_mode text not null default 'igual' check (split_mode in ('igual', 'proporcao', 'valor')),
+  -- 'previsto' = conta a pagar: aparece na lista, mas não entra nos saldos até ser paga
+  status text not null default 'pago' check (status in ('pago', 'previsto')),
+  recurring_id uuid references public.recurring(id) on delete set null,
+  occurrence date,
   created_by uuid not null default auth.uid() references auth.users(id) on delete cascade,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique (recurring_id, occurrence)
 );
 
 -- Quanto cada pessoa deve de cada despesa
@@ -97,6 +122,7 @@ create index if not exists members_user_idx on public.members(user_id);
 create index if not exists expenses_group_date_idx on public.expenses(group_id, date);
 create index if not exists splits_member_idx on public.expense_splits(member_id);
 create index if not exists settlements_group_idx on public.settlements(group_id);
+create index if not exists recurring_group_idx on public.recurring(group_id);
 
 -- ---------- Funções auxiliares de permissão ----------
 create or replace function public.is_member(gid uuid)
@@ -116,6 +142,7 @@ alter table public.members enable row level security;
 alter table public.expenses enable row level security;
 alter table public.expense_splits enable row level security;
 alter table public.settlements enable row level security;
+alter table public.recurring enable row level security;
 
 drop policy if exists "perfil próprio" on public.profiles;
 create policy "perfil próprio" on public.profiles for select using (id = auth.uid());
@@ -163,6 +190,15 @@ drop policy if exists "registrar acerto" on public.settlements;
 create policy "registrar acerto" on public.settlements for insert with check (public.is_member(group_id) and created_by = auth.uid());
 drop policy if exists "apagar acerto" on public.settlements;
 create policy "apagar acerto" on public.settlements for delete using (created_by = auth.uid() or public.is_admin(group_id));
+
+drop policy if exists "ver contas fixas" on public.recurring;
+create policy "ver contas fixas" on public.recurring for select using (public.is_member(group_id));
+drop policy if exists "criar conta fixa" on public.recurring;
+create policy "criar conta fixa" on public.recurring for insert with check (public.is_member(group_id) and created_by = auth.uid());
+drop policy if exists "editar conta fixa" on public.recurring;
+create policy "editar conta fixa" on public.recurring for update using (public.is_member(group_id)) with check (public.is_member(group_id));
+drop policy if exists "apagar conta fixa" on public.recurring;
+create policy "apagar conta fixa" on public.recurring for delete using (created_by = auth.uid() or public.is_admin(group_id));
 
 -- ---------- Funções chamadas pelo app ----------
 
@@ -236,9 +272,11 @@ begin
 end $$;
 
 -- Grava (ou edita) uma despesa junto com a divisão, numa única operação.
+-- p_status: 'pago' ou 'previsto'. p_recurring/p_occurrence: parcela do mês de uma conta fixa.
 create or replace function public.save_expense(
   p_id uuid, p_group uuid, p_description text, p_amount numeric, p_category text, p_date date,
-  p_paid_by uuid, p_for uuid, p_mode text, p_splits jsonb)
+  p_paid_by uuid, p_for uuid, p_mode text, p_splits jsonb,
+  p_status text default 'pago', p_recurring uuid default null, p_occurrence date default null)
 returns uuid language plpgsql security invoker set search_path = public as $$
 declare eid uuid; total numeric;
 begin
@@ -257,19 +295,23 @@ begin
     where not exists (select 1 from members m where m.id = (x->>'member_id')::uuid and m.group_id = p_group)) then
     raise exception 'A divisão inclui alguém de fora do grupo';
   end if;
+  if p_recurring is not null and not exists (select 1 from recurring where id = p_recurring and group_id = p_group) then
+    raise exception 'Conta fixa não encontrada neste grupo';
+  end if;
   select coalesce(sum((x->>'amount')::numeric), 0) into total from jsonb_array_elements(p_splits) x;
   if abs(total - p_amount) > 0.01 then
     raise exception 'A soma da divisão (%) é diferente do valor da despesa (%)', total, p_amount;
   end if;
 
   if p_id is null then
-    insert into expenses (group_id, description, amount, category, date, paid_by, for_member, split_mode)
-    values (p_group, trim(p_description), p_amount, p_category, p_date, p_paid_by, p_for, p_mode)
+    insert into expenses (group_id, description, amount, category, date, paid_by, for_member, split_mode, status, recurring_id, occurrence)
+    values (p_group, trim(p_description), p_amount, p_category, p_date, p_paid_by, p_for, p_mode,
+            coalesce(p_status, 'pago'), p_recurring, case when p_recurring is null then null else date_trunc('month', p_occurrence)::date end)
     returning id into eid;
   else
     update expenses
        set description = trim(p_description), amount = p_amount, category = p_category, date = p_date,
-           paid_by = p_paid_by, for_member = p_for, split_mode = p_mode
+           paid_by = p_paid_by, for_member = p_for, split_mode = p_mode, status = coalesce(p_status, 'pago')
      where id = p_id and group_id = p_group
     returning id into eid;
     if eid is null then raise exception 'Despesa não encontrada'; end if;
@@ -288,12 +330,12 @@ revoke execute on function public.create_group(text, text, text, text, text, jso
 revoke execute on function public.group_preview(text) from public, anon;
 revoke execute on function public.join_group(text, text, uuid) from public, anon;
 revoke execute on function public.leave_group(uuid) from public, anon;
-revoke execute on function public.save_expense(uuid, uuid, text, numeric, text, date, uuid, uuid, text, jsonb) from public, anon;
+revoke execute on function public.save_expense(uuid, uuid, text, numeric, text, date, uuid, uuid, text, jsonb, text, uuid, date) from public, anon;
 grant execute on function public.create_group(text, text, text, text, text, jsonb) to authenticated;
 grant execute on function public.group_preview(text) to authenticated;
 grant execute on function public.join_group(text, text, uuid) to authenticated;
 grant execute on function public.leave_group(uuid) to authenticated;
-grant execute on function public.save_expense(uuid, uuid, text, numeric, text, date, uuid, uuid, text, jsonb) to authenticated;
+grant execute on function public.save_expense(uuid, uuid, text, numeric, text, date, uuid, uuid, text, jsonb, text, uuid, date) to authenticated;
 
 -- ---------- Atualização em tempo real entre os celulares ----------
 do $$
@@ -302,4 +344,5 @@ begin
   begin alter publication supabase_realtime add table public.settlements; exception when others then null; end;
   begin alter publication supabase_realtime add table public.members; exception when others then null; end;
   begin alter publication supabase_realtime add table public.groups; exception when others then null; end;
+  begin alter publication supabase_realtime add table public.recurring; exception when others then null; end;
 end $$;

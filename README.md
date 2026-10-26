@@ -8,13 +8,16 @@ Funciona no celular como app instalável (PWA).
 ## O que tem
 
 **Pessoal** (salvo só no aparelho)
-- Visão geral do mês com receitas, gastos, saldo e meta de poupança
+- Visão geral do mês com receitas, gastos, saldo, saldo previsto e meta de poupança
+- Contas a pagar e a receber: lançamentos previstos, repetição mensal (sem fim ou por N meses), atrasadas e próximos 30 dias
 - Cartões de crédito com parcelamento automático por fatura
 - Histórico mensal e dicas financeiras
 
 **Grupos** (sincronizados pela nuvem, com login)
 - Casa / família: divisão igual, por proporção (ex.: pela renda) ou por valores; filhos sem login, mesada e gastos por filho
 - Viagem: moeda própria, cada gasto dividido só entre quem participou, encerramento da viagem
+- Despesas previstas ("a pagar") que só entram nos saldos depois de pagas
+- Contas fixas da casa que se repetem todo mês com a divisão combinada; custo previsto da viagem por pessoa
 - Saldos de cada pessoa e o menor número de pagamentos para todos ficarem quites
 - Convite por código ou link; quem entra pode assumir um nome já cadastrado
 - Atualização em tempo real entre os celulares

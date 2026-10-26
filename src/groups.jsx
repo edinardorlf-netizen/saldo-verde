@@ -70,6 +70,7 @@ export function balancesOf(members, expenses, settlements) {
   const b = {};
   members.forEach((m) => { b[m.id] = 0; });
   expenses.forEach((e) => {
+    if (e.status === "previsto") return;
     b[e.paid_by] = (b[e.paid_by] || 0) + Number(e.amount);
     (e.expense_splits || []).forEach((s) => { b[s.member_id] = (b[s.member_id] || 0) - Number(s.amount); });
   });
@@ -98,6 +99,45 @@ export function simplify(bal) {
   return out;
 }
 
+const mk = (d) => String(d || "").slice(0, 7);
+const daysInM = (m) => new Date(yearOf(m), monthIdx(m) + 1, 0).getDate();
+const ruleLast = (r) => {
+  const byCount = r.months ? addM(mk(r.start_month), r.months - 1) : null;
+  const end = r.end_month ? mk(r.end_month) : null;
+  if (byCount && end) return byCount < end ? byCount : end;
+  return byCount || end || null;
+};
+
+/* Meses ainda não pagos das contas fixas do grupo, entre dois meses (inclusive). */
+export function groupVirtuals(recurring, expenses, fromM, toM) {
+  const out = [];
+  (recurring || []).forEach((r) => {
+    const start = mk(r.start_month);
+    const last = ruleLast(r);
+    const skipped = (r.skipped || []).map(mk);
+    let m = start > fromM ? start : fromM;
+    for (let guard = 0; m <= toM && guard < 240; guard++, m = addM(m, 1)) {
+      if (last && m > last) break;
+      if (skipped.includes(m)) continue;
+      if (expenses.some((e) => e.recurring_id === r.id && mk(e.occurrence) === m)) continue;
+      out.push({
+        id: `v-${r.id}-${m}`, virtual: true, rule: r, recurring_id: r.id, occurrence: `${m}-01`, status: "previsto",
+        description: r.description, amount: Number(r.amount), category: r.category, paid_by: r.paid_by, for_member: r.for_member,
+        date: `${m}-${pad(Math.min(r.day, daysInM(m)))}`, expense_splits: [],
+      });
+    }
+  });
+  return out;
+}
+
+function dueTxt(date) {
+  const t = todayStr();
+  if (date < t) return { cls: "late", txt: "Atrasada" };
+  if (date === t) return { cls: "today", txt: "Vence hoje" };
+  const days = Math.round((new Date(date) - new Date(t)) / 864e5);
+  return { cls: "soon", txt: days <= 7 ? `Vence em ${days} ${days === 1 ? "dia" : "dias"}` : `Vence ${fmtDate(date).slice(0, 5)}` };
+}
+
 function errMsg(e) {
   const m = (e && (e.message || e.error_description)) || String(e || "");
   if (/Invalid login/i.test(m)) return "E-mail ou senha incorretos.";
@@ -107,6 +147,7 @@ function errMsg(e) {
   if (/invalid.*email|Unable to validate email/i.test(m)) return "Confira o e-mail digitado.";
   if (/Failed to fetch|NetworkError|network|Load failed/i.test(m)) return "Sem conexão com a internet. Tente de novo.";
   if (/rate limit|too many/i.test(m)) return "Muitas tentativas seguidas. Aguarde alguns minutos.";
+  if (/expenses_recurring_id_occurrence_key|duplicate key/i.test(m)) return "Essa conta já foi registrada como paga por alguém do grupo.";
   if (/foreign key/i.test(m)) return "Esta pessoa tem despesas ou pagamentos no grupo e não pode ser removida.";
   if (/row-level security|permission denied/i.test(m)) return "Você não tem permissão para fazer isso neste grupo.";
   return m || "Algo deu errado. Tente de novo.";
@@ -387,7 +428,7 @@ function GroupsHome({ session, onOpen, notify, invite, clearInvite }) {
     setErr("");
     const [g, e, s] = await Promise.all([
       sb.from("groups").select("id,name,kind,emoji,currency,archived,created_at,members(id,user_id,name,is_child)").order("created_at", { ascending: false }),
-      sb.from("expenses").select("group_id,paid_by,amount,expense_splits(member_id,amount)"),
+      sb.from("expenses").select("group_id,paid_by,amount,status,expense_splits(member_id,amount)"),
       sb.from("settlements").select("group_id,from_member,to_member,amount"),
     ]);
     if (g.error) { setErr(errMsg(g.error)); setGroups([]); return; }
@@ -615,22 +656,24 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
   const [members, setMembers] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [settlements, setSettlements] = useState([]);
+  const [recurring, setRecurring] = useState([]);
   const [err, setErr] = useState("");
   const [tab, setTab] = useState("despesas");
   const [sheet, setSheet] = useState(null);
 
   const load = async () => {
-    const [gr, mr, er, sr] = await Promise.all([
+    const [gr, mr, er, sr, rr] = await Promise.all([
       sb.from("groups").select("*").eq("id", id).maybeSingle(),
       sb.from("members").select("*").eq("group_id", id).order("created_at").order("name"),
       sb.from("expenses").select("*, expense_splits(member_id,amount)").eq("group_id", id).order("date", { ascending: false }).order("created_at", { ascending: false }),
       sb.from("settlements").select("*").eq("group_id", id).order("date", { ascending: false }).order("created_at", { ascending: false }),
+      sb.from("recurring").select("*").eq("group_id", id).order("created_at"),
     ]);
-    const firstErr = gr.error || mr.error || er.error || sr.error;
+    const firstErr = gr.error || mr.error || er.error || sr.error || rr.error;
     if (firstErr) { setErr(errMsg(firstErr)); return; }
     if (!gr.data) { setErr("Este grupo não existe mais ou você saiu dele."); return; }
     setErr("");
-    setG(gr.data); setMembers(mr.data); setExpenses(er.data); setSettlements(sr.data);
+    setG(gr.data); setMembers(mr.data); setExpenses(er.data); setSettlements(sr.data); setRecurring(rr.data);
   };
 
   useEffect(() => {
@@ -642,6 +685,7 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
       .on("postgres_changes", { event: "*", schema: "public", table: "settlements", filter: `group_id=eq.${id}` }, later)
       .on("postgres_changes", { event: "*", schema: "public", table: "members", filter: `group_id=eq.${id}` }, later)
       .on("postgres_changes", { event: "*", schema: "public", table: "groups", filter: `id=eq.${id}` }, later)
+      .on("postgres_changes", { event: "*", schema: "public", table: "recurring", filter: `group_id=eq.${id}` }, later)
       .subscribe();
     const onFocus = () => { if (document.visibilityState === "visible") later(); };
     document.addEventListener("visibilitychange", onFocus);
@@ -666,7 +710,13 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
   const curMonth = ym(new Date());
 
   const openNew = (preset) => setSheet({ preset: preset || {} });
-  const openEdit = (e) => setSheet({ expense: e });
+  const openEdit = (e) => (e.virtual ? setSheet({ preset: { virtual: e } }) : setSheet({ expense: e }));
+  const skipMonth = async (v) => {
+    const { error } = await sb.from("recurring").update({ skipped: [...(v.rule.skipped || []), v.occurrence] }).eq("id", v.recurring_id);
+    if (error) return notify(errMsg(error));
+    notify("Mês pulado");
+    load();
+  };
 
   return (
     <div className="g-wrap">
@@ -714,9 +764,9 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
         </div>
       </div>
 
-      {tab === "despesas" && <ExpensesTab g={g} members={members} expenses={expenses} me={me} sel={sel} fm={fm} onOpen={openEdit} onNew={openNew} />}
+      {tab === "despesas" && <ExpensesTab g={g} members={members} expenses={expenses} recurring={recurring} me={me} isAdmin={isAdmin} session={session} sel={sel} fm={fm} onOpen={openEdit} onNew={openNew} onSkip={skipMonth} reload={load} notify={notify} />}
       {tab === "saldos" && <BalancesTab g={g} members={members} settlements={settlements} bal={bal} me={me} isAdmin={isAdmin} fm={fm} reload={load} notify={notify} session={session} />}
-      {tab === "resumo" && <SummaryTab g={g} members={members} expenses={expenses} sel={sel} fm={fm} isAdmin={isAdmin} reload={load} notify={notify} />}
+      {tab === "resumo" && <SummaryTab g={g} members={members} expenses={expenses} recurring={recurring} sel={sel} fm={fm} isAdmin={isAdmin} reload={load} notify={notify} />}
       {tab === "pessoas" && <PeopleTab g={g} members={members} me={me} isAdmin={isAdmin} fm={fm} reload={load} notify={notify} onBack={onBack} onAllowance={(child) => openNew({ category: "mesada", for_member: child.id, description: `Mesada de ${child.name}`, amount: child.allowance })} />}
 
       {sheet && me && (
@@ -728,10 +778,14 @@ function GroupView({ id, session, sel, setSel, onBack, notify }) {
 }
 
 /* ---------- Despesas ---------- */
-function ExpensesTab({ g, members, expenses, me, sel, fm, onOpen, onNew }) {
+function ExpensesTab({ g, members, expenses, recurring, me, isAdmin, session, sel, fm, onOpen, onNew, onSkip, reload, notify }) {
   const casa = g.kind === "casa";
-  const list = casa ? expenses.filter((e) => e.date.slice(0, 7) === sel) : expenses;
-  const total = r2(list.reduce((a, e) => a + Number(e.amount), 0));
+  const inPeriod = casa ? expenses.filter((e) => e.date.slice(0, 7) === sel) : expenses;
+  const virtuals = casa ? groupVirtuals(recurring, expenses, sel, sel) : [];
+  const pending = [...inPeriod.filter((e) => e.status === "previsto"), ...virtuals].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const paid = inPeriod.filter((e) => e.status !== "previsto");
+  const total = r2(paid.reduce((a, e) => a + Number(e.amount), 0));
+  const totalPend = r2(pending.reduce((a, e) => a + Number(e.amount), 0));
   const nameOf = (mid) => (members.find((m) => m.id === mid) || {}).name || "Alguém";
   const today = new Date();
   const dlabel = (d) => {
@@ -743,46 +797,149 @@ function ExpensesTab({ g, members, expenses, me, sel, fm, onOpen, onNew }) {
     return `${Number(dd)} de ${MONTHS[Number(mm) - 1].toLowerCase()}${Number(yy) !== today.getFullYear() ? ` de ${yy}` : ""}`;
   };
 
-  if (!list.length) return (
-    <div className="card empty">
-      <b>{casa ? `Nenhuma despesa em ${monthLabel(sel).toLowerCase()}` : "Nenhuma despesa na viagem ainda"}</b>
-      {casa ? "Lance as contas da casa e o app divide entre vocês." : "Registre o primeiro gasto e escolha quem participou."}
-      {me && <div style={{ marginTop: 12 }}><button className="btn sm" onClick={() => onNew()}>Lançar despesa</button></div>}
+  const fixed = casa ? (
+    <FixedBills g={g} recurring={recurring} expenses={expenses} members={members} me={me} isAdmin={isAdmin} session={session} fm={fm} reload={reload} notify={notify} />
+  ) : null;
+
+  if (!paid.length && !pending.length) return (
+    <div className="stack">
+      <div className="card empty">
+        <b>{casa ? `Nenhuma despesa em ${monthLabel(sel).toLowerCase()}` : "Nenhuma despesa na viagem ainda"}</b>
+        {casa ? "Lance as contas da casa e o app divide entre vocês. Contas como aluguel podem se repetir todo mês." : "Registre os gastos já combinados como previstos e os que forem acontecendo como pagos."}
+        {me && <div style={{ marginTop: 12 }}><button className="btn sm" onClick={() => onNew()}>Lançar despesa</button></div>}
+      </div>
+      {fixed}
     </div>
   );
 
   let lastDay = "";
   return (
+    <div className="stack">
+      {pending.length > 0 && (
+        <div className="card">
+          <div className="card-h"><h2>A pagar</h2><small className="num">{pending.length} {pending.length === 1 ? "conta" : "contas"} · {fm(totalPend)} · fora dos saldos até serem pagas</small></div>
+          <div className="list">
+            {pending.map((e) => {
+              const c = gcat(g.kind, e.category);
+              const due = dueTxt(e.date);
+              return (
+                <div className="row click pending" key={e.id} role="button" tabIndex={0} onClick={() => me && onOpen(e)} onKeyDown={(k) => k.key === "Enter" && me && onOpen(e)}>
+                  <div className="row-ico">{c.emoji}</div>
+                  <div className="row-main">
+                    <b>{e.description}{e.virtual || e.recurring_id ? <span className="tag" title="Conta fixa">🔁</span> : null}</b>
+                    <span><span className={`due ${due.cls}`}>{due.txt}</span> · {c.name}{e.paid_by ? ` · ${nameOf(e.paid_by)} costuma pagar` : ""}</span>
+                  </div>
+                  <div className="row-side"><b>{fm(Number(e.amount))}</b></div>
+                  {me && (
+                    <div className="row-acts" onClick={(k) => k.stopPropagation()}>
+                      <button type="button" className="btn sm paybtn" onClick={() => onOpen(e)}>Pagar</button>
+                      {e.virtual && <ConfirmX label="Pular" confirmLabel="Pular este mês?" onConfirm={() => onSkip(e)} />}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-h"><h2>{casa ? `Pagas em ${MONTHS[monthIdx(sel)].toLowerCase()}` : "Despesas pagas"}</h2><small className="num">{paid.length} lançamentos · {fm(total)}</small></div>
+        {!paid.length ? <div className="empty">Nada pago ainda neste período.</div> : (
+          <div className="list">
+            {paid.map((e) => {
+              const head = e.date !== lastDay ? dlabel(e.date) : null;
+              lastDay = e.date;
+              const c = gcat(g.kind, e.category);
+              const myShare = me ? Number(((e.expense_splits || []).find((s) => s.member_id === me.id) || {}).amount || 0) : 0;
+              const paidByMe = me && e.paid_by === me.id;
+              const lent = r2(Number(e.amount) - myShare);
+              const forName = e.for_member ? nameOf(e.for_member) : "";
+              return (
+                <React.Fragment key={e.id}>
+                  {head && <div className="day">{head}</div>}
+                  <div className="row click" role="button" tabIndex={0} onClick={() => onOpen(e)} onKeyDown={(k) => k.key === "Enter" && onOpen(e)}>
+                    <div className="row-ico">{c.emoji}</div>
+                    <div className="row-main">
+                      <b>{e.description}{e.recurring_id ? <span className="tag" title="Conta fixa">🔁</span> : null}</b>
+                      <span>{paidByMe ? "Você pagou" : `${nameOf(e.paid_by)} pagou`}{forName ? ` · para ${forName}` : ""} · {(e.expense_splits || []).length} na divisão</span>
+                    </div>
+                    <div className="row-side">
+                      <b>{fm(Number(e.amount))}</b>
+                      {paidByMe ? (lent > 0.004 ? <small className="pos">você emprestou {fm(lent)}</small> : <small className="zero">só você</small>) :
+                        myShare > 0 ? <small className="neg">você deve {fm(myShare)}</small> : <small className="zero">fora da divisão</small>}
+                    </div>
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      {fixed}
+    </div>
+  );
+}
+
+/* ---------- Contas fixas da casa ---------- */
+function FixedBills({ g, recurring, expenses, members, me, isAdmin, session, fm, reload, notify }) {
+  const [editing, setEditing] = useState(null);
+  const [v, setV] = useState("");
+  const curM = ym(new Date());
+  const nameOf = (mid) => (members.find((m) => m.id === mid) || {}).name || "";
+  const upd = async (id, patch, msg) => {
+    const { error } = await sb.from("recurring").update(patch).eq("id", id);
+    if (error) return notify(errMsg(error));
+    notify(msg); setEditing(null); reload();
+  };
+  const del = async (id) => {
+    const { error } = await sb.from("recurring").delete().eq("id", id);
+    if (error) return notify(errMsg(error));
+    notify("Conta fixa excluída. O que já foi pago continua no histórico."); reload();
+  };
+  return (
     <div className="card">
-      <div className="card-h"><h2>{casa ? `Despesas de ${MONTHS[monthIdx(sel)].toLowerCase()}` : "Despesas da viagem"}</h2><small className="num">{list.length} lançamentos · {fm(total)}</small></div>
-      <div className="list">
-        {list.map((e) => {
-          const head = e.date !== lastDay ? dlabel(e.date) : null;
-          lastDay = e.date;
-          const c = gcat(g.kind, e.category);
-          const myShare = me ? Number(((e.expense_splits || []).find((s) => s.member_id === me.id) || {}).amount || 0) : 0;
-          const paidByMe = me && e.paid_by === me.id;
-          const lent = r2(Number(e.amount) - myShare);
-          const forName = e.for_member ? nameOf(e.for_member) : "";
-          return (
-            <React.Fragment key={e.id}>
-              {head && <div className="day">{head}</div>}
-              <div className="row click" role="button" tabIndex={0} onClick={() => onOpen(e)} onKeyDown={(k) => k.key === "Enter" && onOpen(e)}>
+      <div className="card-h"><h2>Contas fixas da casa</h2><small>{recurring.length ? `${recurring.length} cadastradas` : ""}</small></div>
+      {!recurring.length ? (
+        <div className="empty">Ao lançar aluguel, condomínio ou internet, escolha “Repetir todo mês”. A conta aparece prevista em cada mês, já com a divisão combinada.</div>
+      ) : (
+        <div className="list">
+          {recurring.map((r) => {
+            const c = gcat(g.kind, r.category);
+            const last = ruleLast(r);
+            const ended = last && last < curM;
+            const paidCount = expenses.filter((e) => e.recurring_id === r.id).length;
+            const canEdit = me && (r.created_by === session.user.id || isAdmin);
+            return (
+              <div className="row" key={r.id} style={{ flexWrap: "wrap" }}>
                 <div className="row-ico">{c.emoji}</div>
                 <div className="row-main">
-                  <b>{e.description}</b>
-                  <span>{paidByMe ? "Você pagou" : `${nameOf(e.paid_by)} pagou`}{forName ? ` · para ${forName}` : ""} · {(e.expense_splits || []).length} na divisão</span>
+                  <b>{r.description}{ended && <span className="tag">Encerrada</span>}</b>
+                  <span>Todo dia {r.day}{last ? ` até ${shortMonth(last)}` : ""}{r.paid_by ? ` · ${nameOf(r.paid_by)} costuma pagar` : ""} · {paidCount} {paidCount === 1 ? "paga" : "pagas"}</span>
                 </div>
-                <div className="row-side">
-                  <b>{fm(Number(e.amount))}</b>
-                  {paidByMe ? (lent > 0.004 ? <small className="pos">você emprestou {fm(lent)}</small> : <small className="zero">só você</small>) :
-                    myShare > 0 ? <small className="neg">você deve {fm(myShare)}</small> : <small className="zero">fora da divisão</small>}
-                </div>
+                {editing === r.id ? (
+                  <span className="payline">
+                    <input className="input num" inputMode="decimal" aria-label="Novo valor" value={v} onChange={(e) => setV(e.target.value)} autoFocus />
+                    <button type="button" className="btn sm" onClick={() => { const n = parseMoney(v); if (n > 0) upd(r.id, { amount: n }, "Valor atualizado para os próximos meses"); }}>Salvar</button>
+                    <button type="button" className="xbtn" onClick={() => setEditing(null)}>Cancelar</button>
+                  </span>
+                ) : (
+                  <>
+                    <div className="row-side"><b>{fm(Number(r.amount))}</b></div>
+                    {me && (
+                      <div className="row-acts">
+                        <button type="button" className="xbtn" style={{ color: "var(--ink-2)" }} onClick={() => { setEditing(r.id); setV(String(Number(r.amount)).replace(".", ",")); }}>Alterar valor</button>
+                        {!ended && <ConfirmX label="Encerrar" confirmLabel="Parar depois deste mês?" onConfirm={() => upd(r.id, { end_month: `${curM}-01` }, "Conta fixa encerrada")} />}
+                        {canEdit && <ConfirmX onConfirm={() => del(r.id)} confirmLabel="Excluir conta fixa?" />}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
-            </React.Fragment>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -792,26 +949,36 @@ function ExpenseSheet({ g, members, me, sel, expense, preset = {}, isAdmin, sess
   const casa = g.kind === "casa";
   const cur = g.currency;
   const isEdit = !!expense;
+  const virtual = preset.virtual || null;
+  const rule = virtual ? virtual.rule : null;
+  const paying = !!virtual || (isEdit && expense.status === "previsto");
   const defDate = casa ? (sel === ym(new Date()) ? todayStr() : `${sel}-01`) : todayStr();
   const adults = members.filter((m) => !m.is_child).map((m) => m.id);
-  const startIds = isEdit ? (expense.expense_splits || []).map((s) => s.member_id) : casa ? adults : members.map((m) => m.id);
+  const memberIds = members.map((m) => m.id);
+  const ruleW = rule ? Object.fromEntries(Object.entries(rule.split_weights || {}).filter(([k]) => memberIds.includes(k)).map(([k, v]) => [k, String(Number(v))])) : {};
+  const startIds = isEdit ? (expense.expense_splits || []).map((s) => s.member_id) : rule && Object.keys(ruleW).length ? Object.keys(ruleW) : casa ? adults : memberIds;
   const shareW = {};
   members.forEach((m) => { shareW[m.id] = String(Number(m.share)); });
   const splitW = {};
   if (isEdit) (expense.expense_splits || []).forEach((s) => { splitW[s.member_id] = String(Number(s.amount)); });
+  const src = isEdit ? expense : virtual;
+  const fmtN = (n) => String(Number(n)).replace(".", ",");
 
   const [f, setF] = useState({
-    description: isEdit ? expense.description : preset.description || "",
-    amount: isEdit ? String(Number(expense.amount)).replace(".", ",") : preset.amount ? String(Number(preset.amount)).replace(".", ",") : "",
-    date: isEdit ? expense.date : defDate,
-    category: isEdit ? expense.category : preset.category || "",
-    paid_by: isEdit ? expense.paid_by : me.id,
-    for_member: isEdit ? expense.for_member || "" : preset.for_member || "",
-    mode: isEdit ? expense.split_mode : "igual",
+    description: src ? src.description : preset.description || "",
+    amount: src ? fmtN(src.amount) : preset.amount ? fmtN(preset.amount) : "",
+    date: src ? (virtual && virtual.date > todayStr() ? todayStr() : src.date) : defDate,
+    category: src ? src.category : preset.category || "",
+    paid_by: src && src.paid_by && memberIds.includes(src.paid_by) ? src.paid_by : me.id,
+    for_member: src ? src.for_member || "" : preset.for_member || "",
+    mode: isEdit ? expense.split_mode : rule ? rule.split_mode : "igual",
+    status: paying ? "pago" : isEdit ? expense.status || "pago" : defDate > todayStr() ? "previsto" : "pago",
+    repeat: "nao",
+    count: "12",
   });
   const [ids, setIds] = useState(startIds);
-  const [weights, setWeights] = useState(isEdit && expense.split_mode === "proporcao" ? { ...shareW, ...splitW } : shareW);
-  const [manual, setManual] = useState(isEdit ? Object.fromEntries(Object.entries(splitW).map(([k, v]) => [k, v.replace(".", ",")])) : {});
+  const [weights, setWeights] = useState(isEdit && expense.split_mode === "proporcao" ? { ...shareW, ...splitW } : rule && rule.split_mode === "proporcao" ? { ...shareW, ...ruleW } : shareW);
+  const [manual, setManual] = useState(isEdit ? Object.fromEntries(Object.entries(splitW).map(([k, v]) => [k, v.replace(".", ",")])) : rule && rule.split_mode === "valor" ? Object.fromEntries(Object.entries(ruleW).map(([k, v]) => [k, v.replace(".", ",")])) : {});
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -836,15 +1003,32 @@ function ExpenseSheet({ g, members, me, sel, expense, preset = {}, isAdmin, sess
     if (!(amount > 0)) return setErr("Informe o valor da despesa.");
     if (!f.category) return setErr("Escolha uma categoria.");
     if (calc.error) return setErr(calc.error);
+    const count = f.repeat === "n" ? Math.round(Number(f.count)) : null;
+    if (f.repeat === "n" && !(count >= 2 && count <= 120)) return setErr("Escolha entre 2 e 120 meses de repetição.");
     setBusy(true); setErr("");
+    let recurringId = virtual ? virtual.recurring_id : null;
+    let occurrence = virtual ? virtual.occurrence : null;
+    if (!isEdit && !virtual && f.repeat !== "nao") {
+      const weightsToSave = Object.fromEntries(ordered.map((mid) => [mid,
+        f.mode === "proporcao" ? Number(String(weights[mid] ?? 0).replace(",", ".")) || 0 : f.mode === "valor" ? parseMoney(manual[mid] ?? "") || 0 : 1]));
+      const { data: rr, error: re } = await sb.from("recurring").insert({
+        group_id: g.id, description: f.description.trim(), amount, category: f.category, paid_by: f.paid_by, for_member: f.for_member || null,
+        split_mode: f.mode, split_weights: weightsToSave, day: Number(f.date.slice(8, 10)), start_month: `${f.date.slice(0, 7)}-01`, months: count,
+      }).select("id").single();
+      if (re) { setBusy(false); return setErr(errMsg(re)); }
+      if (f.status === "previsto") { setBusy(false); return onSaved(`${f.description.trim()} vai se repetir todo mês`); }
+      recurringId = rr.id;
+      occurrence = `${f.date.slice(0, 7)}-01`;
+    }
     const { error } = await sb.rpc("save_expense", {
       p_id: isEdit ? expense.id : null, p_group: g.id, p_description: f.description.trim(), p_amount: amount,
       p_category: f.category, p_date: f.date, p_paid_by: f.paid_by, p_for: f.for_member || null, p_mode: f.mode,
-      p_splits: calc.splits.filter((s) => s.amount > 0),
+      p_splits: calc.splits.filter((s) => s.amount > 0), p_status: f.status, p_recurring: recurringId, p_occurrence: occurrence,
     });
     setBusy(false);
     if (error) return setErr(errMsg(error));
-    onSaved(isEdit ? "Despesa atualizada" : `Despesa de ${money(amount, cur)} lançada`);
+    onSaved(paying && f.status === "pago" ? `Pagamento de ${money(amount, cur)} registrado` : isEdit ? "Despesa atualizada" :
+      f.repeat !== "nao" ? `${f.description.trim()} vai se repetir todo mês` : f.status === "previsto" ? "Despesa prevista adicionada" : `Despesa de ${money(amount, cur)} lançada`);
   };
   const remove = async () => {
     const { error } = await sb.from("expenses").delete().eq("id", expense.id);
@@ -854,16 +1038,16 @@ function ExpenseSheet({ g, members, me, sel, expense, preset = {}, isAdmin, sess
 
   return (
     <div className="sheet-bg" onClick={onClose}>
-      <form className="sheet form" onClick={(e) => e.stopPropagation()} onSubmit={save} noValidate role="dialog" aria-modal="true" aria-label={isEdit ? "Editar despesa" : "Nova despesa"}>
-        <div className="sheet-h"><h2>{isEdit ? "Editar despesa" : "Nova despesa"}</h2><button type="button" className="iconbtn" onClick={onClose} aria-label="Fechar"><Icon name="x" size={18} /></button></div>
+      <form className="sheet form" onClick={(e) => e.stopPropagation()} onSubmit={save} noValidate role="dialog" aria-modal="true" aria-label={paying ? "Registrar pagamento" : isEdit ? "Editar despesa" : "Nova despesa"}>
+        <div className="sheet-h"><h2>{paying ? "Registrar pagamento" : isEdit ? "Editar despesa" : "Nova despesa"}</h2><button type="button" className="iconbtn" onClick={onClose} aria-label="Fechar"><Icon name="x" size={18} /></button></div>
         <div className="field"><label htmlFor="ex-desc">Descrição</label>
           <input id="ex-desc" className="input" maxLength={80} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder={casa ? "Ex.: Conta de luz" : "Ex.: Jantar no restaurante"} /></div>
         <div className="fgrid">
           <div className="field"><label htmlFor="ex-amount">Valor ({cur})</label>
             <input id="ex-amount" className="input num" inputMode="decimal" value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} placeholder="0,00" /></div>
           <div className="field"><label htmlFor="ex-date">Data</label>
-            <input id="ex-date" className="input" type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></div>
-          <div className="field"><label htmlFor="ex-paid">Quem pagou</label>
+            <input id="ex-date" className="input" type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value, status: !paying && e.target.value > todayStr() ? "previsto" : f.status })} /></div>
+          <div className="field"><label htmlFor="ex-paid">{f.status === "previsto" ? "Quem vai pagar" : "Quem pagou"}</label>
             <select id="ex-paid" className="input" value={f.paid_by} onChange={(e) => setF({ ...f, paid_by: e.target.value })}>
               {members.filter((m) => !m.is_child || m.id === f.paid_by).map((m) => <option key={m.id} value={m.id}>{m.id === me.id ? `${m.name} (você)` : m.name}</option>)}
             </select></div>
@@ -875,6 +1059,31 @@ function ExpenseSheet({ g, members, me, sel, expense, preset = {}, isAdmin, sess
               </select></div>
           )}
         </div>
+        {!paying && (
+          <div className="fgrid">
+            <div className="field"><span className="flabel">Situação</span>
+              <div className="seg">
+                <button type="button" className={f.status === "pago" ? "on r" : ""} onClick={() => setF({ ...f, status: "pago" })}>Já foi paga</button>
+                <button type="button" className={f.status === "previsto" ? "on" : ""} onClick={() => setF({ ...f, status: "previsto" })}>A pagar</button>
+              </div></div>
+            {casa && !isEdit && (
+              <div className="field"><label htmlFor="ex-repeat">Repetir</label>
+                <select id="ex-repeat" className="input" value={f.repeat} onChange={(e) => setF({ ...f, repeat: e.target.value })}>
+                  <option value="nao">Não repete</option>
+                  <option value="sempre">Todo mês, sem data para acabar</option>
+                  <option value="n">Todo mês, por alguns meses</option>
+                </select></div>
+            )}
+            {f.repeat === "n" && (
+              <div className="field"><label htmlFor="ex-count">Quantos meses</label>
+                <input id="ex-count" className="input num" inputMode="numeric" value={f.count} onChange={(e) => setF({ ...f, count: e.target.value.replace(/\D/g, "").slice(0, 3) })} /></div>
+            )}
+          </div>
+        )}
+        {!paying && f.status === "previsto" && <p className="hint">Despesas a pagar aparecem na lista, mas só entram em “quem deve a quem” depois de pagas.</p>}
+        {!paying && f.repeat !== "nao" && f.date && <p className="hint">Repete todo dia {Number(f.date.slice(8, 10))} com a mesma divisão. {f.status === "pago" ? "Este mês já entra como pago; os próximos ficam a pagar." : "Todos os meses ficam a pagar até alguém registrar o pagamento."}</p>}
+        {paying && <p className="hint">Confira o valor e quem pagou. Ao salvar, a despesa entra nos saldos do grupo.</p>}
+
         <div className="field"><span className="flabel">Categoria</span>
           <div className="chips">
             {GCATS[g.kind].map((c) => (
@@ -914,7 +1123,7 @@ function ExpenseSheet({ g, members, me, sel, expense, preset = {}, isAdmin, sess
         </div>
 
         {err && <p className="err">{err}</p>}
-        <button className="btn" type="submit" disabled={busy}>{busy ? "Salvando…" : isEdit ? "Salvar alterações" : "Lançar despesa"}</button>
+        <button className="btn" type="submit" disabled={busy}>{busy ? "Salvando…" : paying ? "Registrar pagamento" : isEdit ? "Salvar alterações" : f.repeat !== "nao" ? "Criar conta fixa" : f.status === "previsto" ? "Adicionar como prevista" : "Lançar despesa"}</button>
         {canDelete && <div style={{ textAlign: "center" }}><ConfirmX label="Excluir despesa" confirmLabel="Toque de novo para excluir" onConfirm={remove} /></div>}
       </form>
     </div>
@@ -1041,8 +1250,12 @@ function BalancesTab({ g, members, settlements, bal, me, isAdmin, fm, reload, no
 }
 
 /* ---------- Resumo ---------- */
-function SummaryTab({ g, members, expenses, sel, fm, isAdmin, reload, notify }) {
+function SummaryTab({ g, members, expenses: allExp, recurring, sel, fm, isAdmin, reload, notify }) {
   const casa = g.kind === "casa";
+  const expenses = allExp.filter((e) => e.status !== "previsto");
+  const periodAll = casa ? allExp.filter((e) => e.date.slice(0, 7) === sel) : allExp;
+  const pendList = [...periodAll.filter((e) => e.status === "previsto"), ...(casa ? groupVirtuals(recurring, allExp, sel, sel) : [])];
+  const totalPend = r2(pendList.reduce((a, e) => a + Number(e.amount), 0));
   const list = casa ? expenses.filter((e) => e.date.slice(0, 7) === sel) : expenses;
   const total = r2(list.reduce((a, e) => a + Number(e.amount), 0));
   const nameOf = (mid) => (members.find((m) => m.id === mid) || {}).name || "Alguém";
@@ -1089,10 +1302,11 @@ function SummaryTab({ g, members, expenses, sel, fm, isAdmin, reload, notify }) 
           {!casa && isAdmin && (g.archived ? <button className="btn ghost" onClick={() => setArchived(false)}>Reabrir viagem</button> : <ConfirmX label="Encerrar viagem" confirmLabel="Confirmar encerramento" onConfirm={() => setArchived(true)} />)}
         </div>
         <div className="tiles">
-          <div className="tile"><small>Total gasto</small><b>{fm(total)}</b></div>
-          <div className="tile"><small>Média por {casa ? "adulto" : "pessoa"}</small><b>{fm(total / people)}</b></div>
-          <div className="tile"><small>Lançamentos</small><b>{list.length}</b></div>
-          {!casa && <div className="tile"><small>Média por dia{days ? ` (${days} ${days === 1 ? "dia" : "dias"})` : ""}</small><b>{fm(days ? total / days : 0)}</b></div>}
+          <div className="tile"><small>{casa ? "Já pago" : "Já pago"}</small><b>{fm(total)}</b></div>
+          <div className="tile"><small>Previsto a pagar</small><b>{fm(totalPend)}</b></div>
+          {casa ? <div className="tile"><small>Total do mês por adulto</small><b>{fm((total + totalPend) / people)}</b></div>
+            : <div className="tile"><small>Custo total previsto por pessoa</small><b>{fm((total + totalPend) / people)}</b></div>}
+          {!casa && <div className="tile"><small>Média paga por dia{days ? ` (${days} ${days === 1 ? "dia" : "dias"})` : ""}</small><b>{fm(days ? total / days : 0)}</b></div>}
         </div>
         {!casa && g.archived && <p className="hint" style={{ marginTop: 12 }}>Viagem encerrada. Os acertos pendentes continuam na aba “Saldos”.</p>}
       </div>
