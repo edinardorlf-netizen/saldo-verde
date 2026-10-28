@@ -4,6 +4,7 @@
   "private": true,
   "description": "Controle financeiro pessoal com grupos compartilhados (casa e viagem).",
   "scripts": {
+    "build:licitacoes": "esbuild licitacoes/src/main.jsx --bundle --minify --format=iife --target=es2018 --define:process.env.NODE_ENV='\"production\"' --outfile=licitacoes/app.js",
     "build": "esbuild src/main.jsx --bundle --minify --format=iife --target=es2018 --define:process.env.NODE_ENV='\"production\"' --outfile=app.js"
   },
   "dependencies": {
