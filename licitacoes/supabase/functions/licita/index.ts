@@ -42,7 +42,8 @@ let lastPcp = 0;
 
 async function pncpGet(path: string): Promise<any> {
   if (pncpBloqueado) throw new Limite("PNCP pediu para esperar");
-  const wait = lastPncp + 1300 - Date.now();
+  // O PNCP aceita poucas consultas por minuto: uma a cada 4,5 s fica dentro do limite.
+  const wait = lastPncp + 4500 - Date.now();
   if (wait > 0) await sleep(wait);
   lastPncp = Date.now();
   const r = await fetch(PNCP + path, { headers: { Accept: "application/json", "User-Agent": UA } });
@@ -138,9 +139,15 @@ async function radar(deadline: number) {
   for (const mod of cfg.modalidades || [6, 8]) {
     for (let pagina = 1; pagina <= 40; pagina++) {
       if (Date.now() > deadline) return { lidos, relevantes, paginas, parcial: true };
-      const res = await pncpGet(
-        `/api/consulta/v1/contratacoes/publicacao?dataInicial=${ymd(ontem)}&dataFinal=${ymd(hoje)}&codigoModalidadeContratacao=${mod}&uf=${cfg.uf}&pagina=${pagina}&tamanhoPagina=50`,
-      );
+      let res: any;
+      try {
+        res = await pncpGet(
+          `/api/consulta/v1/contratacoes/publicacao?dataInicial=${ymd(ontem)}&dataFinal=${ymd(hoje)}&codigoModalidadeContratacao=${mod}&uf=${cfg.uf}&pagina=${pagina}&tamanhoPagina=50`,
+        );
+      } catch (e) {
+        if (e instanceof Limite) return { lidos, relevantes, paginas, parcial: true, aviso: "O PNCP pediu uma pausa; o restante entra na próxima rodada." };
+        throw e;
+      }
       paginas++;
       const lista = (res && res.data) || [];
       if (!lista.length) break;
